@@ -30,6 +30,19 @@ def test_idr_float() -> None:
     assert _to_float("-IDR500,000") == -500_000
 
 
+def test_stock_remaining() -> None:
+    def stock_remaining(initial_pcs: float, sold_pcs: float):
+        initial = max(0.0, float(initial_pcs or 0))
+        sold = max(0.0, float(sold_pcs or 0))
+        raw = initial - sold
+        return max(0.0, raw), raw, raw < 0
+
+    remain, raw, over = stock_remaining(100, 40)
+    assert remain == 60 and raw == 60 and not over
+    remain, raw, over = stock_remaining(10, 25)
+    assert remain == 0 and raw == -15 and over
+
+
 def test_demo_metrics() -> None:
     demo = demo_line_items()
     assert not demo.empty
@@ -69,6 +82,7 @@ if __name__ == "__main__":
     test_parse_url()
     test_parse_url_with_pli()
     test_idr_float()
+    test_stock_remaining()
     test_demo_metrics()
     test_live_sheet_optional()
     print("ok")

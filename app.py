@@ -111,6 +111,13 @@ h1, h2, h3, .rd-brand {
   color: var(--rd-muted);
 }
 
+.rd-stock-warn {
+  color: #9a3412;
+  font-size: 0.82rem;
+  margin-top: 0.35rem;
+  display: block;
+}
+
 .rd-panel {
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(47, 107, 79, 0.1);
@@ -182,6 +189,29 @@ def filter_items(
             mask &= dates.isna() | (dates.dt.date <= end_date)
         filtered = filtered[mask]
     return filtered
+
+
+def pcs_sold_by_product(items: pd.DataFrame) -> dict[str, float]:
+    """Sum pcs sold per product line (BurnX Matcha / BurnX Fiber)."""
+    totals = {"BurnX Matcha": 0.0, "BurnX Fiber": 0.0}
+    if items.empty or "product_line" not in items.columns:
+        return totals
+    grouped = items.groupby("product_line", as_index=True)["pcs"].sum()
+    for line, value in grouped.items():
+        if line in totals:
+            totals[line] = float(value)
+    return totals
+
+
+def stock_remaining(initial_pcs: float, sold_pcs: float) -> tuple[float, float, bool]:
+    """Return (display_remaining, raw_remaining, oversold).
+
+    Display remaining is clamped at 0; oversold is True when sold > initial.
+    """
+    initial = max(0.0, float(initial_pcs or 0))
+    sold = max(0.0, float(sold_pcs or 0))
+    raw = initial - sold
+    return max(0.0, raw), raw, raw < 0
 
 
 def sales_recap_table(items: pd.DataFrame) -> pd.DataFrame:
@@ -264,6 +294,27 @@ def main() -> None:
             "(when funds were disbursed to the seller)."
         )
         st.divider()
+        st.markdown("**Initial stock (pcs)**")
+        st.caption("Remaining = initial − pcs sold in the selected disbursement period.")
+        if "initial_stock_matcha" not in st.session_state:
+            st.session_state.initial_stock_matcha = 0
+        if "initial_stock_fiber" not in st.session_state:
+            st.session_state.initial_stock_fiber = 0
+        st.number_input(
+            "BurnX Matcha (pcs)",
+            min_value=0,
+            step=1,
+            key="initial_stock_matcha",
+            help="Starting Matcha inventory in pieces before the selected period.",
+        )
+        st.number_input(
+            "BurnX Fiber (pcs)",
+            min_value=0,
+            step=1,
+            key="initial_stock_fiber",
+            help="Starting Fiber inventory in pieces before the selected period.",
+        )
+        st.divider()
         st.markdown("**COGS reference**")
         st.caption(
             f"Matcha {format_idr(COGS_PER_PC['BurnX Matcha'])}/pc · "
@@ -319,6 +370,8 @@ def main() -> None:
         )
 
     filtered = filter_items(items, product_filter, start_date, end_date)
+    # Stock uses the disbursement period only (all BurnX lines), not the product multiselect.
+    period_items = filter_items(items, ["BurnX Matcha", "BurnX Fiber"], start_date, end_date)
     if filtered.empty:
         st.warning("No rows match the current filters. Widen the date range or product selection.")
         st.stop()
@@ -343,6 +396,63 @@ def main() -> None:
                 f'<span class="hint">{hint}</span></div>',
                 unsafe_allow_html=True,
             )
+
+    sold_by_product = pcs_sold_by_product(period_items)
+    matcha_initial = float(st.session_state.initial_stock_matcha or 0)
+    fiber_initial = float(st.session_state.initial_stock_fiber or 0)
+    matcha_sold = sold_by_product["BurnX Matcha"]
+    fiber_sold = sold_by_product["BurnX Fiber"]
+    matcha_remain, matcha_raw, matcha_over = stock_remaining(matcha_initial, matcha_sold)
+    fiber_remain, fiber_raw, fiber_over = stock_remaining(fiber_initial, fiber_sold)
+
+    st.markdown("### Stock remaining")
+    period_label = "selected period"
+    if start_date and end_date:
+        period_label = f"{start_date.isoformat()} → {end_date.isoformat()}"
+    st.caption(
+        f"Initial stock (sidebar) minus pcs sold in **{period_label}** "
+        "(Money Received / disbursement dates). Values clamped at 0 if oversold."
+    )
+    s1, s2 = st.columns(2)
+    for col, title, initial, sold, remain, raw, over in (
+        (
+            s1,
+            "BurnX Matcha",
+            matcha_initial,
+            matcha_sold,
+            matcha_remain,
+            matcha_raw,
+            matcha_over,
+        ),
+        (
+            s2,
+            "BurnX Fiber",
+            fiber_initial,
+            fiber_sold,
+            fiber_remain,
+            fiber_raw,
+            fiber_over,
+        ),
+    ):
+        warn_html = ""
+        if over:
+            warn_html = (
+                f'<span class="rd-stock-warn">Sold exceeds initial by '
+                f"{abs(raw):,.0f} pcs — showing 0 remaining.</span>"
+            )
+        with col:
+            st.markdown(
+                f'<div class="rd-kpi"><label>{title}</label>'
+                f"<strong>{remain:,.0f} pcs remaining</strong>"
+                f'<span class="hint">Initial {initial:,.0f} · Sold in period {sold:,.0f} pcs</span>'
+                f"{warn_html}</div>",
+                unsafe_allow_html=True,
+            )
+    if matcha_over or fiber_over:
+        st.warning(
+            "One or more products sold more pcs than the initial stock you entered "
+            "for this period. Remaining is shown as 0 — raise initial stock or narrow the dates."
+        )
 
     st.markdown("### Sales recap")
     st.caption(
