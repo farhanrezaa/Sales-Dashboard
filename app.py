@@ -171,6 +171,15 @@ def load_items(
         return demo_line_items(), "demo", str(exc)
 
 
+STOCK_VARIANTS: list[tuple[str, str, str]] = [
+    ("BurnX Fiber", "Raspberry", "stock_fiber_raspberry"),
+    ("BurnX Fiber", "Blackcurrant", "stock_fiber_blackcurrant"),
+    ("BurnX Fiber", "Strawberry", "stock_fiber_strawberry"),
+    ("BurnX Matcha", "Mango", "stock_matcha_mango"),
+    ("BurnX Matcha", "Lemon", "stock_matcha_lemon"),
+]
+
+
 def filter_items(
     items: pd.DataFrame,
     product_filter: list[str],
@@ -191,15 +200,14 @@ def filter_items(
     return filtered
 
 
-def pcs_sold_by_product(items: pd.DataFrame) -> dict[str, float]:
-    """Sum pcs sold per product line (BurnX Matcha / BurnX Fiber)."""
-    totals = {"BurnX Matcha": 0.0, "BurnX Fiber": 0.0}
-    if items.empty or "product_line" not in items.columns:
+def pcs_sold_by_variant(items: pd.DataFrame) -> dict[tuple[str, str], float]:
+    """Sum pcs sold per (product_line, variant). Mixed expansions already land on named variants."""
+    totals: dict[tuple[str, str], float] = {}
+    if items.empty:
         return totals
-    grouped = items.groupby("product_line", as_index=True)["pcs"].sum()
-    for line, value in grouped.items():
-        if line in totals:
-            totals[line] = float(value)
+    grouped = items.groupby(["product_line", "variant"], as_index=False)["pcs"].sum()
+    for _, row in grouped.iterrows():
+        totals[(str(row["product_line"]), str(row["variant"]))] = float(row["pcs"])
     return totals
 
 
@@ -246,10 +254,10 @@ def main() -> None:
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
     logo = find_logo()
-    hero_cols = st.columns([1, 6])
+    hero_cols = st.columns([1.1, 5.5])
     with hero_cols[0]:
         if logo:
-            st.image(str(logo), width=88)
+            st.image(str(logo), width=120)
         else:
             st.markdown(
                 "<div style='width:72px;height:72px;border-radius:18px;"
@@ -294,26 +302,22 @@ def main() -> None:
             "(when funds were disbursed to the seller)."
         )
         st.divider()
-        st.markdown("**Initial stock (pcs)**")
-        st.caption("Remaining = initial − pcs sold in the selected disbursement period.")
-        if "initial_stock_matcha" not in st.session_state:
-            st.session_state.initial_stock_matcha = 0
-        if "initial_stock_fiber" not in st.session_state:
-            st.session_state.initial_stock_fiber = 0
-        st.number_input(
-            "BurnX Matcha (pcs)",
-            min_value=0,
-            step=1,
-            key="initial_stock_matcha",
-            help="Starting Matcha inventory in pieces before the selected period.",
+        st.markdown("**Initial stock by variant (pcs)**")
+        st.caption(
+            "Remaining = initial − pcs sold for that variant under **applied** filters. "
+            "Mixed SKU sales already expand into named flavors. "
+            "**Unspecified** sold pcs are tracked separately and do not reduce these initials."
         )
-        st.number_input(
-            "BurnX Fiber (pcs)",
-            min_value=0,
-            step=1,
-            key="initial_stock_fiber",
-            help="Starting Fiber inventory in pieces before the selected period.",
-        )
+        for product_line, variant, key in STOCK_VARIANTS:
+            if key not in st.session_state:
+                st.session_state[key] = 0
+            st.number_input(
+                f"{product_line} - {variant}",
+                min_value=0,
+                step=1,
+                key=key,
+                help=f"Starting {variant} inventory (pcs) before the applied period.",
+            )
         st.divider()
         st.markdown("**COGS reference**")
         st.caption(
@@ -349,31 +353,78 @@ def main() -> None:
     min_date = date_series.min().date() if not date_series.empty else None
     max_date = date_series.max().date() if not date_series.empty else None
 
+    # Draft vs applied filters — widgets edit draft; KPIs/stock use applied until Apply.
+    if "filters_initialized" not in st.session_state:
+        st.session_state.draft_products = list(products)
+        st.session_state.draft_start = min_date
+        st.session_state.draft_end = max_date
+        st.session_state.applied_products = list(products)
+        st.session_state.applied_start = min_date
+        st.session_state.applied_end = max_date
+        st.session_state.filters_initialized = True
+    else:
+        # Drop stale product selections after sheet refresh; keep applied dates clamped.
+        st.session_state.draft_products = [
+            p for p in st.session_state.draft_products if p in products
+        ] or list(products)
+        st.session_state.applied_products = [
+            p for p in st.session_state.applied_products if p in products
+        ] or list(products)
+        if min_date and max_date:
+            for key in ("draft_start", "draft_end", "applied_start", "applied_end"):
+                value = st.session_state.get(key)
+                if value is None or value < min_date or value > max_date:
+                    st.session_state[key] = min_date if key.endswith("start") else max_date
+
     filter_cols = st.columns([2, 1, 1])
     with filter_cols[0]:
-        product_filter = st.multiselect("Product lines", options=products, default=products)
+        st.multiselect("Product lines", options=products, key="draft_products")
     with filter_cols[1]:
-        start_date = st.date_input(
+        st.date_input(
             "From (disbursed)",
-            value=min_date,
             min_value=min_date,
             max_value=max_date,
             disabled=min_date is None,
+            key="draft_start",
         )
     with filter_cols[2]:
-        end_date = st.date_input(
+        st.date_input(
             "To (disbursed)",
-            value=max_date,
             min_value=min_date,
             max_value=max_date,
             disabled=max_date is None,
+            key="draft_end",
         )
 
+    apply_cols = st.columns([1, 5])
+    with apply_cols[0]:
+        apply_clicked = st.button(
+            "Apply",
+            type="primary",
+            use_container_width=True,
+            help="Apply product and date filters to KPIs, stock, and tables.",
+        )
+    if apply_clicked:
+        st.session_state.applied_products = list(st.session_state.draft_products)
+        st.session_state.applied_start = st.session_state.draft_start
+        st.session_state.applied_end = st.session_state.draft_end
+        st.rerun()
+
+    product_filter = list(st.session_state.applied_products)
+    start_date = st.session_state.applied_start
+    end_date = st.session_state.applied_end
+
+    draft_dirty = (
+        list(st.session_state.draft_products) != product_filter
+        or st.session_state.draft_start != start_date
+        or st.session_state.draft_end != end_date
+    )
+    if draft_dirty:
+        st.info("Filters changed — click **Apply** to update KPIs, stock, and tables.")
+
     filtered = filter_items(items, product_filter, start_date, end_date)
-    # Stock uses the disbursement period only (all BurnX lines), not the product multiselect.
-    period_items = filter_items(items, ["BurnX Matcha", "BurnX Fiber"], start_date, end_date)
     if filtered.empty:
-        st.warning("No rows match the current filters. Widen the date range or product selection.")
+        st.warning("No rows match the applied filters. Widen the date range or product selection, then Apply.")
         st.stop()
 
     gross = float(filtered["gross_revenue"].sum())
@@ -397,61 +448,76 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
-    sold_by_product = pcs_sold_by_product(period_items)
-    matcha_initial = float(st.session_state.initial_stock_matcha or 0)
-    fiber_initial = float(st.session_state.initial_stock_fiber or 0)
-    matcha_sold = sold_by_product["BurnX Matcha"]
-    fiber_sold = sold_by_product["BurnX Fiber"]
-    matcha_remain, matcha_raw, matcha_over = stock_remaining(matcha_initial, matcha_sold)
-    fiber_remain, fiber_raw, fiber_over = stock_remaining(fiber_initial, fiber_sold)
+    sold_by_variant = pcs_sold_by_variant(filtered)
+    unspecified_sold = sum(
+        pcs_val
+        for (line, variant), pcs_val in sold_by_variant.items()
+        if variant == "Unspecified"
+    )
 
     st.markdown("### Stock remaining")
-    period_label = "selected period"
+    period_label = "applied period"
     if start_date and end_date:
         period_label = f"{start_date.isoformat()} → {end_date.isoformat()}"
     st.caption(
-        f"Initial stock (sidebar) minus pcs sold in **{period_label}** "
-        "(Money Received / disbursement dates). Values clamped at 0 if oversold."
+        f"Per-variant remaining under applied filters (**{period_label}**). "
+        "Mixed sales count toward named flavors. Unspecified sold does not reduce named initials."
     )
-    s1, s2 = st.columns(2)
-    for col, title, initial, sold, remain, raw, over in (
-        (
-            s1,
-            "BurnX Matcha",
-            matcha_initial,
-            matcha_sold,
-            matcha_remain,
-            matcha_raw,
-            matcha_over,
-        ),
-        (
-            s2,
-            "BurnX Fiber",
-            fiber_initial,
-            fiber_sold,
-            fiber_remain,
-            fiber_raw,
-            fiber_over,
-        ),
-    ):
+
+    any_over = False
+    stock_cols = st.columns(5)
+    for col, (product_line, variant, key) in zip(stock_cols, STOCK_VARIANTS):
+        initial = float(st.session_state.get(key, 0) or 0)
+        sold = sold_by_variant.get((product_line, variant), 0.0)
+        remain, raw, over = stock_remaining(initial, sold)
+        any_over = any_over or over
         warn_html = ""
         if over:
             warn_html = (
-                f'<span class="rd-stock-warn">Sold exceeds initial by '
-                f"{abs(raw):,.0f} pcs — showing 0 remaining.</span>"
+                f'<span class="rd-stock-warn">Oversold by {abs(raw):,.0f} pcs — showing 0.</span>'
             )
         with col:
             st.markdown(
-                f'<div class="rd-kpi"><label>{title}</label>'
-                f"<strong>{remain:,.0f} pcs remaining</strong>"
-                f'<span class="hint">Initial {initial:,.0f} · Sold in period {sold:,.0f} pcs</span>'
+                f'<div class="rd-kpi"><label>{product_line}<br/>{variant}</label>'
+                f"<strong>{remain:,.0f} pcs</strong>"
+                f'<span class="hint">Init {initial:,.0f} · Sold {sold:,.0f}</span>'
                 f"{warn_html}</div>",
                 unsafe_allow_html=True,
             )
-    if matcha_over or fiber_over:
+
+    # Product totals summary
+    summary_cols = st.columns(2)
+    for col, product_line in zip(summary_cols, ("BurnX Matcha", "BurnX Fiber")):
+        variants = [v for pl, v, _ in STOCK_VARIANTS if pl == product_line]
+        init_total = sum(
+            float(st.session_state.get(key, 0) or 0)
+            for pl, v, key in STOCK_VARIANTS
+            if pl == product_line
+        )
+        sold_total = sum(sold_by_variant.get((product_line, v), 0.0) for v in variants)
+        remain_total = sum(
+            stock_remaining(
+                float(st.session_state.get(key, 0) or 0),
+                sold_by_variant.get((product_line, variant), 0.0),
+            )[0]
+            for pl, variant, key in STOCK_VARIANTS
+            if pl == product_line
+        )
+        with col:
+            st.caption(
+                f"**{product_line} total:** {remain_total:,.0f} pcs remaining "
+                f"(initial {init_total:,.0f} · sold {sold_total:,.0f})"
+            )
+
+    if unspecified_sold > 0:
+        st.caption(
+            f"Unspecified variant sold in applied filters: **{unspecified_sold:,.0f} pcs** "
+            "(not deducted from named initials)."
+        )
+    if any_over:
         st.warning(
-            "One or more products sold more pcs than the initial stock you entered "
-            "for this period. Remaining is shown as 0 — raise initial stock or narrow the dates."
+            "One or more variants sold more pcs than the initial stock you entered. "
+            "Remaining is shown as 0 — raise initials or narrow applied filters."
         )
 
     st.markdown("### Sales recap")
