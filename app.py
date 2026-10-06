@@ -180,13 +180,27 @@ STOCK_VARIANTS: list[tuple[str, str, str]] = [
     ("BurnX Matcha", "Lemon", "stock_matcha_lemon"),
 ]
 
+# Baseline inventory snapshot — defaults pre-filled in the sidebar.
+INITIAL_STOCK_AS_OF = date(2026, 9, 23)
+DEFAULT_INITIAL_STOCK: dict[str, int] = {
+    "stock_matcha_lemon": 220,
+    "stock_matcha_mango": 200,
+    "stock_fiber_strawberry": 270,
+    "stock_fiber_raspberry": 240,
+    "stock_fiber_blackcurrant": 185,
+}
+
 # UI label → line-item column used for From/To filtering.
 DATE_BASIS_OPTIONS: dict[str, str] = {
     "Disbursed Date": "disbursed_at",
     "Payment Date": "payment_at",
 }
 DEFAULT_DATE_BASIS = "Disbursed Date"
-DEFAULT_LOOKBACK_DAYS = 90
+
+VARIANT_LABELS: list[str] = [f"{pl} - {v}" for pl, v, _ in STOCK_VARIANTS]
+LABEL_TO_VARIANT: dict[str, tuple[str, str]] = {
+    f"{pl} - {v}": (pl, v) for pl, v, _ in STOCK_VARIANTS
+}
 
 
 def date_column_for_basis(basis: str) -> str:
@@ -208,9 +222,9 @@ def date_bounds(items: pd.DataFrame, date_column: str) -> tuple:
 
 
 def default_date_range(today: date | None = None) -> tuple[date, date]:
-    """From = today − 90 days, To = today (applied on first load)."""
+    """From = initial-stock baseline (23 Sep 2026), To = today (applied on first load)."""
     today = today or date.today()
-    return today - timedelta(days=DEFAULT_LOOKBACK_DAYS), today
+    return INITIAL_STOCK_AS_OF, today
 
 
 def widget_date_bounds(
@@ -218,7 +232,7 @@ def widget_date_bounds(
     date_column: str,
     today: date | None = None,
 ) -> tuple[date, date]:
-    """Allow picking the 90-day default window even outside sheet min/max."""
+    """Allow picking the baseline→today default window even outside sheet min/max."""
     today = today or date.today()
     default_from, default_to = default_date_range(today)
     sheet_min, sheet_max = date_bounds(items, date_column)
@@ -284,14 +298,43 @@ def pcs_sold_by_variant(items: pd.DataFrame) -> dict[tuple[str, str], float]:
     return totals
 
 
-def stock_remaining(initial_pcs: float, sold_pcs: float) -> tuple[float, float, bool]:
+def stock_ins_in_scope(
+    events: list[dict],
+    product_line: str,
+    variant: str,
+    start_date,
+    end_date,
+) -> float:
+    """Sum incoming pcs for a variant with on_date inside applied [From, To]."""
+    total = 0.0
+    for event in events:
+        if event.get("product_line") != product_line or event.get("variant") != variant:
+            continue
+        on_date = event.get("on_date")
+        pcs = float(event.get("pcs") or 0)
+        if on_date is None or pcs <= 0:
+            continue
+        if start_date is not None and on_date < start_date:
+            continue
+        if end_date is not None and on_date > end_date:
+            continue
+        total += pcs
+    return total
+
+
+def stock_remaining(
+    initial_pcs: float,
+    sold_pcs: float,
+    stock_in_pcs: float = 0.0,
+) -> tuple[float, float, bool]:
     """Return (display_remaining, raw_remaining, oversold).
 
-    Display remaining is clamped at 0; oversold is True when sold > initial.
+    ``remaining = initial + stock_ins − sold``. Display remaining is clamped at 0.
     """
     initial = max(0.0, float(initial_pcs or 0))
     sold = max(0.0, float(sold_pcs or 0))
-    raw = initial - sold
+    stock_in = max(0.0, float(stock_in_pcs or 0))
+    raw = initial + stock_in - sold
     return max(0.0, raw), raw, raw < 0
 
 
@@ -377,20 +420,88 @@ def main() -> None:
         st.divider()
         st.markdown("**Initial stock by variant (pcs)**")
         st.caption(
-            "Remaining = initial − pcs sold for that variant under **applied** filters. "
-            "Mixed SKU sales already expand into named flavors. "
-            "**Unspecified** sold pcs are tracked separately and do not reduce these initials."
+            "Defaults are inventory **as of 23 Sep 2026** "
+            f"({INITIAL_STOCK_AS_OF.isoformat()}). "
+            "Edit freely if your count differs."
+        )
+        st.caption(
+            "**Remaining** = initial + incoming in applied From/To − sold in applied From/To "
+            "(same **Apply** date basis). Default From is the baseline date. "
+            "Mixed expands into named flavors; Unspecified sold does not reduce named stock."
         )
         for product_line, variant, key in STOCK_VARIANTS:
             if key not in st.session_state:
-                st.session_state[key] = 0
+                st.session_state[key] = int(DEFAULT_INITIAL_STOCK.get(key, 0))
             st.number_input(
                 f"{product_line} - {variant}",
                 min_value=0,
                 step=1,
                 key=key,
-                help=f"Starting {variant} inventory (pcs) before the applied period.",
+                help=(
+                    f"Starting {variant} inventory (pcs) as of "
+                    f"{INITIAL_STOCK_AS_OF.isoformat()}."
+                ),
             )
+
+        st.divider()
+        st.markdown("**Additional / incoming stock**")
+        st.caption(
+            "Add incoming stock events (variant + date + pcs). "
+            "They count when the date falls inside the **applied** From/To."
+        )
+        if "stock_ins" not in st.session_state:
+            st.session_state.stock_ins = []
+        if "stock_in_seq" not in st.session_state:
+            st.session_state.stock_in_seq = 0
+
+        with st.form("add_stock_in", clear_on_submit=True):
+            pick = st.selectbox("Variant", options=VARIANT_LABELS, key="stock_in_variant_pick")
+            in_date = st.date_input(
+                "Stock-in date",
+                value=max(date.today(), INITIAL_STOCK_AS_OF + timedelta(days=1)),
+                key="stock_in_date_pick",
+            )
+            in_pcs = st.number_input(
+                "Pcs received",
+                min_value=1,
+                step=1,
+                value=1,
+                key="stock_in_pcs_pick",
+            )
+            add_in = st.form_submit_button("Add stock-in", use_container_width=True)
+        if add_in:
+            product_line, variant = LABEL_TO_VARIANT[pick]
+            st.session_state.stock_in_seq = int(st.session_state.stock_in_seq) + 1
+            st.session_state.stock_ins.append(
+                {
+                    "id": int(st.session_state.stock_in_seq),
+                    "product_line": product_line,
+                    "variant": variant,
+                    "on_date": in_date,
+                    "pcs": int(in_pcs),
+                }
+            )
+            st.rerun()
+
+        if st.session_state.stock_ins:
+            st.caption(f"{len(st.session_state.stock_ins)} stock-in event(s)")
+            for event in list(st.session_state.stock_ins):
+                label = (
+                    f"{event['product_line']} - {event['variant']} · "
+                    f"{event['on_date'].isoformat()} · +{event['pcs']:,} pcs"
+                )
+                row_l, row_r = st.columns([4, 1])
+                with row_l:
+                    st.markdown(f"<span style='font-size:0.9rem'>{label}</span>", unsafe_allow_html=True)
+                with row_r:
+                    if st.button("✕", key=f"del_stock_in_{event['id']}", help="Remove this stock-in"):
+                        st.session_state.stock_ins = [
+                            e for e in st.session_state.stock_ins if e["id"] != event["id"]
+                        ]
+                        st.rerun()
+        else:
+            st.caption("No stock-ins yet — add deliveries above.")
+
         st.divider()
         st.markdown("**COGS reference**")
         st.caption(
@@ -436,7 +547,7 @@ def main() -> None:
         st.session_state.draft_start = default_from
         st.session_state.draft_end = default_to
         st.session_state.applied_products = list(products)
-        # First load already applied with today−90 → today.
+        # First load already applied with baseline (23 Sep 2026) → today.
         st.session_state.applied_start = default_from
         st.session_state.applied_end = default_to
         st.session_state.filters_initialized = True
@@ -501,7 +612,7 @@ def main() -> None:
             min_value=draft_min,
             max_value=draft_max,
             key="draft_start",
-            help=f"Default on load: today − {DEFAULT_LOOKBACK_DAYS} days.",
+            help=f"Default on load: {INITIAL_STOCK_AS_OF.isoformat()} (initial stock as-of date).",
         )
     with filter_cols[3]:
         st.date_input(
@@ -568,12 +679,14 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
+    # Stock sold uses the same applied From/To (+ date basis) as KPIs.
     sold_by_variant = pcs_sold_by_variant(filtered)
     unspecified_sold = sum(
         pcs_val
         for (line, variant), pcs_val in sold_by_variant.items()
         if variant == "Unspecified"
     )
+    stock_ins = list(st.session_state.get("stock_ins") or [])
 
     st.markdown("### Stock remaining")
     period_label = "applied period"
@@ -581,16 +694,23 @@ def main() -> None:
         period_label = f"{start_date.isoformat()} → {end_date.isoformat()}"
     st.caption(
         f"Per-variant remaining under applied filters (**{applied_basis}**, **{period_label}**). "
-        "Boxes use Fiber 18 pcs/box · Matcha 20 pcs/box. "
-        "Mixed sales count toward named flavors. Unspecified sold does not reduce named initials."
+        f"**Formula:** remaining = initial (as of {INITIAL_STOCK_AS_OF.isoformat()}) "
+        "+ incoming in [From, To] − sold in [From, To]. "
+        "Boxes: Fiber 18 pcs/box · Matcha 20 pcs/box. "
+        "Mixed → named flavors; Unspecified sold does not reduce named stock."
     )
 
     any_over = False
     stock_cols = st.columns(5)
+    remain_by_key: dict[str, float] = {}
     for col, (product_line, variant, key) in zip(stock_cols, STOCK_VARIANTS):
         initial = float(st.session_state.get(key, 0) or 0)
         sold = sold_by_variant.get((product_line, variant), 0.0)
-        remain, raw, over = stock_remaining(initial, sold)
+        stock_in = stock_ins_in_scope(
+            stock_ins, product_line, variant, start_date, end_date
+        )
+        remain, raw, over = stock_remaining(initial, sold, stock_in)
+        remain_by_key[key] = remain
         any_over = any_over or over
         warn_html = ""
         if over:
@@ -602,7 +722,7 @@ def main() -> None:
             st.markdown(
                 f'<div class="rd-kpi"><label>{product_line}<br/>{variant}</label>'
                 f"<strong>{remain_label}</strong>"
-                f'<span class="hint">Init {initial:,.0f} · Sold {sold:,.0f}</span>'
+                f'<span class="hint">Init {initial:,.0f} · In +{stock_in:,.0f} · Sold {sold:,.0f}</span>'
                 f"{warn_html}</div>",
                 unsafe_allow_html=True,
             )
@@ -617,29 +737,30 @@ def main() -> None:
             if pl == product_line
         )
         sold_total = sum(sold_by_variant.get((product_line, v), 0.0) for v in variants)
+        in_total = sum(
+            stock_ins_in_scope(stock_ins, product_line, v, start_date, end_date)
+            for v in variants
+        )
         remain_total = sum(
-            stock_remaining(
-                float(st.session_state.get(key, 0) or 0),
-                sold_by_variant.get((product_line, variant), 0.0),
-            )[0]
+            remain_by_key[key]
             for pl, variant, key in STOCK_VARIANTS
             if pl == product_line
         )
         with col:
             st.caption(
                 f"**{product_line} total:** {format_pcs_with_boxes(remain_total, product_line)} remaining "
-                f"(initial {init_total:,.0f} · sold {sold_total:,.0f})"
+                f"(initial {init_total:,.0f} · in +{in_total:,.0f} · sold {sold_total:,.0f})"
             )
 
     if unspecified_sold > 0:
         st.caption(
-            f"Unspecified variant sold in applied filters: **{unspecified_sold:,.0f} pcs** "
-            "(not deducted from named initials)."
+            f"Unspecified variant sold in applied filters: "
+            f"**{unspecified_sold:,.0f} pcs** (not deducted from named initials)."
         )
     if any_over:
         st.warning(
-            "One or more variants sold more pcs than the initial stock you entered. "
-            "Remaining is shown as 0 — raise initials or narrow applied filters."
+            "One or more variants sold more pcs than initial + stock-ins in the applied window. "
+            "Remaining is shown as 0 — raise initials, add stock-ins, or narrow applied filters."
         )
 
     st.markdown("### Sales recap")

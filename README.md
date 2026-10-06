@@ -59,8 +59,8 @@ Supports two layouts:
 ### RD Collectio ledger (default tab `gid=792137116`)
 - Header row with **Payment Date**, **Money Received Date**, **Variant**, **Qty Sold**, **Income**.
 - Gross = **Income** (IDR-formatted).
-- Date basis filter (draft → **Apply**): **Disbursed Date** and **Payment Date** are always listed. Defaults: **From** = today − 90 days, **To** = today (applied on first load). All KPIs, sales recap, and remaining stock use the applied basis + range; rows missing the selected date are excluded.
-- Remaining stock shows pcs with box estimate (Fiber 18 pcs/box · Matcha 20 pcs/box), e.g. `27 pcs (1.5 box)`.
+- Date basis filter (draft → **Apply**): **Disbursed Date** and **Payment Date** are always listed. Defaults: **From** = **2026-09-23** (initial stock as-of), **To** = today (applied on first load). All KPIs, sales recap, and remaining stock use the applied basis + range; rows missing the selected date are excluded.
+- Remaining stock: defaults **as of 23 Sep 2026** (Matcha Lemon 220 / Mango 200; Fiber Strawberry 270 / Raspberry 240 / Blackcurrant 185). Add dated **incoming** stock events in the sidebar. Formula: `remaining = initial + incoming([From, To]) − sold([From, To])`. Shows pcs with box estimate (Fiber 18 / Matcha 20), e.g. `27 pcs (1.5 box)`.
 - **Qty Sold** is piece counts (`Capital per 1 pcs` present). Multi-line Variant cells are split and qty/income shared.
 - Mixed SKUs and named variants parsed from Variant text; Ads rows skipped.
 

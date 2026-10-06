@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 
 from app import (
-    DEFAULT_LOOKBACK_DAYS,
+    DEFAULT_INITIAL_STOCK,
+    INITIAL_STOCK_AS_OF,
     date_basis_options,
     default_date_range,
     filter_items,
     format_pcs_with_boxes,
+    stock_ins_in_scope,
+    stock_remaining,
 )
 from products import PCS_PER_BOX, build_line_items, demo_line_items, map_columns, _to_float
 from sheet_loader import DEFAULT_SHEET_URL, fetch_sheet_csv, parse_sheet_url
@@ -42,16 +45,56 @@ def test_idr_float() -> None:
 
 
 def test_stock_remaining() -> None:
-    def stock_remaining(initial_pcs: float, sold_pcs: float):
-        initial = max(0.0, float(initial_pcs or 0))
-        sold = max(0.0, float(sold_pcs or 0))
-        raw = initial - sold
-        return max(0.0, raw), raw, raw < 0
-
     remain, raw, over = stock_remaining(100, 40)
     assert remain == 60 and raw == 60 and not over
     remain, raw, over = stock_remaining(10, 25)
     assert remain == 0 and raw == -15 and over
+
+
+def test_stock_remaining_with_stock_in_simulation() -> None:
+    # Lemon init 220 as of 23 Sep; sell 20 on 25 Sep; +300 on 30 Sep → 500.
+    remain, raw, over = stock_remaining(220, 20, 300)
+    assert remain == 500 and raw == 500 and not over
+    assert INITIAL_STOCK_AS_OF == date(2026, 9, 23)
+    assert DEFAULT_INITIAL_STOCK["stock_matcha_lemon"] == 220
+    assert DEFAULT_INITIAL_STOCK["stock_matcha_mango"] == 200
+    assert DEFAULT_INITIAL_STOCK["stock_fiber_strawberry"] == 270
+    assert DEFAULT_INITIAL_STOCK["stock_fiber_raspberry"] == 240
+    assert DEFAULT_INITIAL_STOCK["stock_fiber_blackcurrant"] == 185
+
+    events = [
+        {
+            "product_line": "BurnX Matcha",
+            "variant": "Lemon",
+            "on_date": date(2026, 9, 30),
+            "pcs": 300,
+        },
+        {
+            "product_line": "BurnX Matcha",
+            "variant": "Lemon",
+            "on_date": date(2026, 9, 20),  # before From — ignored
+            "pcs": 50,
+        },
+    ]
+    scoped = stock_ins_in_scope(
+        events,
+        "BurnX Matcha",
+        "Lemon",
+        date(2026, 9, 23),
+        date(2026, 10, 6),
+    )
+    assert scoped == 300
+    # Outside applied To — ignored
+    assert (
+        stock_ins_in_scope(
+            events,
+            "BurnX Matcha",
+            "Lemon",
+            date(2026, 9, 23),
+            date(2026, 9, 28),
+        )
+        == 0
+    )
 
 
 def test_format_pcs_with_boxes() -> None:
@@ -81,12 +124,11 @@ def test_date_basis_options_always_both() -> None:
     assert date_basis_options(None) == ["Disbursed Date", "Payment Date"]
 
 
-def test_default_date_range_90d() -> None:
+def test_default_date_range_baseline() -> None:
     today = date(2026, 10, 6)
     start, end = default_date_range(today)
+    assert start == INITIAL_STOCK_AS_OF == date(2026, 9, 23)
     assert end == today
-    assert start == today - timedelta(days=DEFAULT_LOOKBACK_DAYS)
-    assert DEFAULT_LOOKBACK_DAYS == 90
 
 
 def test_date_basis_filter() -> None:
@@ -141,8 +183,11 @@ if __name__ == "__main__":
     test_parse_url_with_pli()
     test_idr_float()
     test_stock_remaining()
+    test_stock_remaining_with_stock_in_simulation()
     test_format_pcs_with_boxes()
     test_demo_metrics()
+    test_date_basis_options_always_both()
+    test_default_date_range_baseline()
     test_date_basis_filter()
     test_live_sheet_optional()
     print("ok")
