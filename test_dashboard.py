@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from products import build_line_items, demo_line_items, map_columns, _to_float
+from datetime import date
+
+from app import filter_items, format_pcs_with_boxes
+from products import PCS_PER_BOX, build_line_items, demo_line_items, map_columns, _to_float
 from sheet_loader import DEFAULT_SHEET_URL, fetch_sheet_csv, parse_sheet_url
 
 NEW_SHEET_ID = "1uInQ3r5p0ye8t5PqXEb5J7Jltwtxn1sZ8KB1vf8sr9o"
@@ -43,11 +46,34 @@ def test_stock_remaining() -> None:
     assert remain == 0 and raw == -15 and over
 
 
+def test_format_pcs_with_boxes() -> None:
+    assert format_pcs_with_boxes(27, "BurnX Fiber") == "27 pcs (1.5 box)"
+    assert format_pcs_with_boxes(20, "BurnX Matcha") == "20 pcs (1.0 box)"
+    assert PCS_PER_BOX["BurnX Fiber"] == 18
+    assert PCS_PER_BOX["BurnX Matcha"] == 20
+
+
 def test_demo_metrics() -> None:
     demo = demo_line_items()
     assert not demo.empty
     assert set(demo["product_line"]) <= {"BurnX Matcha", "BurnX Fiber"}
     assert (demo["net_revenue"] == demo["gross_revenue"] - demo["cogs"]).all()
+    assert "payment_at" in demo.columns
+    assert demo["payment_at"].notna().any()
+
+
+def test_date_basis_filter() -> None:
+    demo = demo_line_items()
+    by_payment = filter_items(
+        demo, ["BurnX Matcha"], date(2026, 8, 8), date(2026, 8, 11), date_column="payment_at"
+    )
+    by_disbursed = filter_items(
+        demo, ["BurnX Matcha"], date(2026, 8, 8), date(2026, 8, 11), date_column="disbursed_at"
+    )
+    # Payment dates are earlier than disbursed on demo rows — sets differ.
+    assert not by_payment.empty
+    assert not by_disbursed.empty
+    assert float(by_payment["pcs"].sum()) != float(by_disbursed["pcs"].sum())
 
 
 def test_live_sheet_optional() -> None:
@@ -55,6 +81,8 @@ def test_live_sheet_optional() -> None:
     raw = fetch_sheet_csv(DEFAULT_SHEET_URL, cache_bust="test")
     mapping = map_columns(raw)
     assert mapping.get("disbursed_at") in {"Money Received Date", "Tanggal Dana Dilepaskan"}
+    assert mapping.get("payment_at") == "Payment Date"
+    assert "Payment Date" in raw.columns
     assert mapping.get("gross") in {"Income", "Total Penghasilan"}
     assert mapping.get("product_name") in {"Variant", "Nama Produk"}
     assert "Qty Sold" in raw.columns or any("qty" in c.lower() for c in raw.columns)
@@ -64,6 +92,7 @@ def test_live_sheet_optional() -> None:
     assert items["gross_revenue"].sum() > 0
     assert items["product_line"].isin(["BurnX Matcha", "BurnX Fiber"]).all()
     assert items["disbursed_at"].notna().any()
+    assert items["payment_at"].notna().any()
     print(
         "live rows",
         len(items),
@@ -73,6 +102,8 @@ def test_live_sheet_optional() -> None:
         float(items["net_revenue"].sum()),
         "pcs",
         float(items["pcs"].sum()),
+        "payment_at non-null",
+        int(items["payment_at"].notna().sum()),
         "columns",
         list(raw.columns),
     )
@@ -83,6 +114,8 @@ if __name__ == "__main__":
     test_parse_url_with_pli()
     test_idr_float()
     test_stock_remaining()
+    test_format_pcs_with_boxes()
     test_demo_metrics()
+    test_date_basis_filter()
     test_live_sheet_optional()
     print("ok")

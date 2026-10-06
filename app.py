@@ -179,25 +179,55 @@ STOCK_VARIANTS: list[tuple[str, str, str]] = [
     ("BurnX Matcha", "Lemon", "stock_matcha_lemon"),
 ]
 
+# UI label → line-item column used for From/To filtering.
+DATE_BASIS_OPTIONS: dict[str, str] = {
+    "Disbursed Date": "disbursed_at",
+    "Payment Date": "payment_at",
+}
+DEFAULT_DATE_BASIS = "Disbursed Date"
+
+
+def date_column_for_basis(basis: str) -> str:
+    return DATE_BASIS_OPTIONS.get(basis, DATE_BASIS_OPTIONS[DEFAULT_DATE_BASIS])
+
+
+def date_bounds(items: pd.DataFrame, date_column: str) -> tuple:
+    if date_column not in items.columns:
+        return None, None
+    date_series = pd.to_datetime(items[date_column], errors="coerce").dropna()
+    if date_series.empty:
+        return None, None
+    return date_series.min().date(), date_series.max().date()
+
 
 def filter_items(
     items: pd.DataFrame,
     product_filter: list[str],
     start_date,
     end_date,
+    date_column: str = "disbursed_at",
 ) -> pd.DataFrame:
     filtered = items.copy()
     if product_filter:
         filtered = filtered[filtered["product_line"].isin(product_filter)]
-    if "disbursed_at" in filtered.columns and filtered["disbursed_at"].notna().any():
-        dates = pd.to_datetime(filtered["disbursed_at"], errors="coerce")
-        mask = pd.Series(True, index=filtered.index)
-        if start_date is not None:
-            mask &= dates.isna() | (dates.dt.date >= start_date)
-        if end_date is not None:
-            mask &= dates.isna() | (dates.dt.date <= end_date)
-        filtered = filtered[mask]
-    return filtered
+    if date_column not in filtered.columns:
+        return filtered
+    dates = pd.to_datetime(filtered[date_column], errors="coerce")
+    # Require a value on the selected basis so sparse columns (e.g. Payment Date)
+    # do not leak undated rows into the applied period.
+    mask = dates.notna()
+    if start_date is not None:
+        mask &= dates.dt.date >= start_date
+    if end_date is not None:
+        mask &= dates.dt.date <= end_date
+    return filtered[mask]
+
+
+def format_pcs_with_boxes(pcs: float, product_line: str) -> str:
+    """e.g. ``27 pcs (1.5 box)`` using Fiber=18 / Matcha=20 pcs per box."""
+    per_box = float(PCS_PER_BOX.get(product_line, 1) or 1)
+    boxes = float(pcs) / per_box
+    return f"{pcs:,.0f} pcs ({boxes:.1f} box)"
 
 
 def pcs_sold_by_variant(items: pd.DataFrame) -> dict[tuple[str, str], float]:
@@ -298,8 +328,8 @@ def main() -> None:
 
         force_demo = st.toggle("Use demo data", value=False)
         st.caption(
-            "Date filter uses **Money Received Date** / **Tanggal Dana Dilepaskan** "
-            "(when funds were disbursed to the seller)."
+            "Date basis: **Disbursed Date** = Money Received / Tanggal Dana Dilepaskan; "
+            "**Payment Date** = sheet Payment Date column. Choose in the filter bar, then Apply."
         )
         st.divider()
         st.markdown("**Initial stock by variant (pcs)**")
@@ -349,12 +379,20 @@ def main() -> None:
         st.stop()
 
     products = sorted(items["product_line"].dropna().unique().tolist())
-    date_series = pd.to_datetime(items["disbursed_at"], errors="coerce").dropna()
-    min_date = date_series.min().date() if not date_series.empty else None
-    max_date = date_series.max().date() if not date_series.empty else None
+    available_basis = [
+        label
+        for label, col in DATE_BASIS_OPTIONS.items()
+        if col in items.columns and items[col].notna().any()
+    ] or [DEFAULT_DATE_BASIS]
 
     # Draft vs applied filters — widgets edit draft; KPIs/stock use applied until Apply.
     if "filters_initialized" not in st.session_state:
+        default_basis = (
+            DEFAULT_DATE_BASIS if DEFAULT_DATE_BASIS in available_basis else available_basis[0]
+        )
+        min_date, max_date = date_bounds(items, date_column_for_basis(default_basis))
+        st.session_state.draft_date_basis = default_basis
+        st.session_state.applied_date_basis = default_basis
         st.session_state.draft_products = list(products)
         st.session_state.draft_start = min_date
         st.session_state.draft_end = max_date
@@ -370,29 +408,64 @@ def main() -> None:
         st.session_state.applied_products = [
             p for p in st.session_state.applied_products if p in products
         ] or list(products)
-        if min_date and max_date:
-            for key in ("draft_start", "draft_end", "applied_start", "applied_end"):
-                value = st.session_state.get(key)
-                if value is None or value < min_date or value > max_date:
-                    st.session_state[key] = min_date if key.endswith("start") else max_date
+        if st.session_state.get("draft_date_basis") not in available_basis:
+            st.session_state.draft_date_basis = available_basis[0]
+        if st.session_state.get("applied_date_basis") not in available_basis:
+            st.session_state.applied_date_basis = available_basis[0]
 
-    filter_cols = st.columns([2, 1, 1])
+    draft_basis = st.session_state.get("draft_date_basis", DEFAULT_DATE_BASIS)
+    draft_min, draft_max = date_bounds(items, date_column_for_basis(draft_basis))
+    applied_basis = st.session_state.get("applied_date_basis", DEFAULT_DATE_BASIS)
+    applied_min, applied_max = date_bounds(items, date_column_for_basis(applied_basis))
+
+    # Clamp draft dates to the draft basis range; applied dates to the applied basis range.
+    if draft_min and draft_max:
+        for key in ("draft_start", "draft_end"):
+            value = st.session_state.get(key)
+            if value is None or value < draft_min or value > draft_max:
+                st.session_state[key] = draft_min if key.endswith("start") else draft_max
+    if applied_min and applied_max:
+        for key in ("applied_start", "applied_end"):
+            value = st.session_state.get(key)
+            if value is None or value < applied_min or value > applied_max:
+                st.session_state[key] = applied_min if key.endswith("start") else applied_max
+
+    filter_cols = st.columns([1.4, 1.6, 1, 1])
     with filter_cols[0]:
-        st.multiselect("Product lines", options=products, key="draft_products")
-    with filter_cols[1]:
-        st.date_input(
-            "From (disbursed)",
-            min_value=min_date,
-            max_value=max_date,
-            disabled=min_date is None,
-            key="draft_start",
+        st.selectbox(
+            "Date basis",
+            options=available_basis,
+            key="draft_date_basis",
+            help=(
+                "Disbursed Date = Money Received / Tanggal Dana Dilepaskan. "
+                "Payment Date = sheet Payment Date column."
+            ),
         )
+    # Recompute bounds if the selectbox just changed draft basis this run.
+    draft_basis = st.session_state.draft_date_basis
+    draft_min, draft_max = date_bounds(items, date_column_for_basis(draft_basis))
+    if draft_min and draft_max:
+        for key in ("draft_start", "draft_end"):
+            value = st.session_state.get(key)
+            if value is None or value < draft_min or value > draft_max:
+                st.session_state[key] = draft_min if key.endswith("start") else draft_max
+
+    with filter_cols[1]:
+        st.multiselect("Product lines", options=products, key="draft_products")
     with filter_cols[2]:
         st.date_input(
-            "To (disbursed)",
-            min_value=min_date,
-            max_value=max_date,
-            disabled=max_date is None,
+            "From",
+            min_value=draft_min,
+            max_value=draft_max,
+            disabled=draft_min is None,
+            key="draft_start",
+        )
+    with filter_cols[3]:
+        st.date_input(
+            "To",
+            min_value=draft_min,
+            max_value=draft_max,
+            disabled=draft_max is None,
             key="draft_end",
         )
 
@@ -402,9 +475,10 @@ def main() -> None:
             "Apply",
             type="primary",
             use_container_width=True,
-            help="Apply product and date filters to KPIs, stock, and tables.",
+            help="Apply date basis, product, and date filters to KPIs, stock, and tables.",
         )
     if apply_clicked:
+        st.session_state.applied_date_basis = st.session_state.draft_date_basis
         st.session_state.applied_products = list(st.session_state.draft_products)
         st.session_state.applied_start = st.session_state.draft_start
         st.session_state.applied_end = st.session_state.draft_end
@@ -413,16 +487,19 @@ def main() -> None:
     product_filter = list(st.session_state.applied_products)
     start_date = st.session_state.applied_start
     end_date = st.session_state.applied_end
+    applied_basis = st.session_state.applied_date_basis
+    date_column = date_column_for_basis(applied_basis)
 
     draft_dirty = (
-        list(st.session_state.draft_products) != product_filter
+        st.session_state.draft_date_basis != applied_basis
+        or list(st.session_state.draft_products) != product_filter
         or st.session_state.draft_start != start_date
         or st.session_state.draft_end != end_date
     )
     if draft_dirty:
         st.info("Filters changed — click **Apply** to update KPIs, stock, and tables.")
 
-    filtered = filter_items(items, product_filter, start_date, end_date)
+    filtered = filter_items(items, product_filter, start_date, end_date, date_column=date_column)
     if filtered.empty:
         st.warning("No rows match the applied filters. Widen the date range or product selection, then Apply.")
         st.stop()
@@ -460,7 +537,8 @@ def main() -> None:
     if start_date and end_date:
         period_label = f"{start_date.isoformat()} → {end_date.isoformat()}"
     st.caption(
-        f"Per-variant remaining under applied filters (**{period_label}**). "
+        f"Per-variant remaining under applied filters (**{applied_basis}**, **{period_label}**). "
+        "Boxes use Fiber 18 pcs/box · Matcha 20 pcs/box. "
         "Mixed sales count toward named flavors. Unspecified sold does not reduce named initials."
     )
 
@@ -476,10 +554,11 @@ def main() -> None:
             warn_html = (
                 f'<span class="rd-stock-warn">Oversold by {abs(raw):,.0f} pcs — showing 0.</span>'
             )
+        remain_label = format_pcs_with_boxes(remain, product_line)
         with col:
             st.markdown(
                 f'<div class="rd-kpi"><label>{product_line}<br/>{variant}</label>'
-                f"<strong>{remain:,.0f} pcs</strong>"
+                f"<strong>{remain_label}</strong>"
                 f'<span class="hint">Init {initial:,.0f} · Sold {sold:,.0f}</span>'
                 f"{warn_html}</div>",
                 unsafe_allow_html=True,
@@ -505,7 +584,7 @@ def main() -> None:
         )
         with col:
             st.caption(
-                f"**{product_line} total:** {remain_total:,.0f} pcs remaining "
+                f"**{product_line} total:** {format_pcs_with_boxes(remain_total, product_line)} remaining "
                 f"(initial {init_total:,.0f} · sold {sold_total:,.0f})"
             )
 

@@ -180,6 +180,11 @@ def map_columns(df: pd.DataFrame) -> dict[str, str]:
             "disbursement date",
             "money received date",
         ],
+        "payment_at": [
+            "payment date",
+            "tanggal pembayaran",
+            "tanggal bayar",
+        ],
         "ordered_at": ["waktu pesanan dibuat", "tanggal pesanan", "order time"],
         # Ledger "Income" is gross (replaces Total Penghasilan on this tab).
         "gross": ["total penghasilan", "income", "penghasilan", "gross revenue"],
@@ -223,6 +228,7 @@ def _append_line_records(
     parsed: ParsedProduct,
     gross: float,
     disbursed,
+    payment,
     ordered,
     product_name: str,
 ) -> None:
@@ -254,6 +260,7 @@ def _append_line_records(
                 "cogs": line_cogs,
                 "net_revenue": line_gross - line_cogs,
                 "disbursed_at": disbursed,
+                "payment_at": payment,
                 "ordered_at": ordered,
                 "product_name": product_name,
             }
@@ -293,6 +300,9 @@ def build_line_items(df: pd.DataFrame) -> pd.DataFrame:
         disbursed = None
         if "disbursed_at" in column_map:
             disbursed = pd.to_datetime(row[column_map["disbursed_at"]], errors="coerce", dayfirst=True)
+        payment = None
+        if "payment_at" in column_map:
+            payment = pd.to_datetime(row[column_map["payment_at"]], errors="coerce", dayfirst=True)
         ordered = None
         if "ordered_at" in column_map:
             ordered = pd.to_datetime(row[column_map["ordered_at"]], errors="coerce")
@@ -339,6 +349,7 @@ def build_line_items(df: pd.DataFrame) -> pd.DataFrame:
                 parsed=parsed,
                 gross=gross / n,
                 disbursed=disbursed,
+                payment=payment,
                 ordered=ordered,
                 product_name=line,
             )
@@ -359,6 +370,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 850_000,
             "cogs": 40 * 16_325,
             "disbursed_at": pd.Timestamp("2026-08-10"),
+            "payment_at": pd.Timestamp("2026-08-08"),
             "ordered_at": pd.Timestamp("2026-08-08"),
             "product_name": "BurnX Matcha - Mango",
         },
@@ -372,6 +384,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 425_000,
             "cogs": 20 * 16_325,
             "disbursed_at": pd.Timestamp("2026-08-12"),
+            "payment_at": pd.Timestamp("2026-08-11"),
             "ordered_at": pd.Timestamp("2026-08-11"),
             "product_name": "BurnX Matcha - Lemon",
         },
@@ -385,6 +398,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 210_000,
             "cogs": 10 * 16_325,
             "disbursed_at": pd.Timestamp("2026-08-15"),
+            "payment_at": pd.Timestamp("2026-08-14"),
             "ordered_at": pd.Timestamp("2026-08-14"),
             "product_name": "BurnX Matcha - Mixed",
         },
@@ -398,6 +412,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 210_000,
             "cogs": 10 * 16_325,
             "disbursed_at": pd.Timestamp("2026-08-15"),
+            "payment_at": pd.Timestamp("2026-08-14"),
             "ordered_at": pd.Timestamp("2026-08-14"),
             "product_name": "BurnX Matcha - Mixed",
         },
@@ -411,6 +426,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 720_000,
             "cogs": 54 * 11_500,
             "disbursed_at": pd.Timestamp("2026-08-18"),
+            "payment_at": pd.Timestamp("2026-08-17"),
             "ordered_at": pd.Timestamp("2026-08-17"),
             "product_name": "BurnX Fiber - Strawberry",
         },
@@ -424,6 +440,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 80_000,
             "cogs": 6 * 11_500,
             "disbursed_at": pd.Timestamp("2026-08-20"),
+            "payment_at": pd.Timestamp("2026-08-19"),
             "ordered_at": pd.Timestamp("2026-08-19"),
             "product_name": "BurnX Fiber - Mixed",
         },
@@ -437,6 +454,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 80_000,
             "cogs": 6 * 11_500,
             "disbursed_at": pd.Timestamp("2026-08-20"),
+            "payment_at": pd.Timestamp("2026-08-19"),
             "ordered_at": pd.Timestamp("2026-08-19"),
             "product_name": "BurnX Fiber - Mixed",
         },
@@ -450,6 +468,7 @@ def demo_line_items() -> pd.DataFrame:
             "gross_revenue": 80_000,
             "cogs": 6 * 11_500,
             "disbursed_at": pd.Timestamp("2026-08-20"),
+            "payment_at": pd.Timestamp("2026-08-19"),
             "ordered_at": pd.Timestamp("2026-08-19"),
             "product_name": "BurnX Fiber - Mixed",
         },

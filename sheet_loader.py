@@ -23,6 +23,7 @@ HEADER_HINTS = (
     "no. pesanan",
     "lihat berdasarkan",
     "money received date",
+    "payment date",
     "qty sold",
     "variant",
     "income",
