@@ -59,7 +59,7 @@ Supports two layouts:
 ### RD Collectio ledger (default tab `gid=792137116`)
 - Header row with **Payment Date**, **Money Received Date**, **Variant**, **Qty Sold**, **Income**.
 - Gross = **Income** (IDR-formatted).
-- Date basis filter (draft → **Apply**): **Disbursed Date** = Money Received / Tanggal Dana Dilepaskan, or **Payment Date** = sheet **Payment Date** column. All KPIs, sales recap, and remaining stock use the applied basis + range.
+- Date basis filter (draft → **Apply**): **Disbursed Date** and **Payment Date** are always listed. Defaults: **From** = today − 90 days, **To** = today (applied on first load). All KPIs, sales recap, and remaining stock use the applied basis + range; rows missing the selected date are excluded.
 - Remaining stock shows pcs with box estimate (Fiber 18 pcs/box · Matcha 20 pcs/box), e.g. `27 pcs (1.5 box)`.
 - **Qty Sold** is piece counts (`Capital per 1 pcs` present). Multi-line Variant cells are split and qty/income shared.
 - Mixed SKUs and named variants parsed from Variant text; Ads rows skipped.

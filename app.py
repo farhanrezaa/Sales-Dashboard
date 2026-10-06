@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import altair as alt
@@ -185,10 +186,16 @@ DATE_BASIS_OPTIONS: dict[str, str] = {
     "Payment Date": "payment_at",
 }
 DEFAULT_DATE_BASIS = "Disbursed Date"
+DEFAULT_LOOKBACK_DAYS = 90
 
 
 def date_column_for_basis(basis: str) -> str:
     return DATE_BASIS_OPTIONS.get(basis, DATE_BASIS_OPTIONS[DEFAULT_DATE_BASIS])
+
+
+def date_basis_options(_items: pd.DataFrame | None = None) -> list[str]:
+    """Always list both bases — never hide Payment Date for sparse/empty values."""
+    return list(DATE_BASIS_OPTIONS.keys())
 
 
 def date_bounds(items: pd.DataFrame, date_column: str) -> tuple:
@@ -198,6 +205,42 @@ def date_bounds(items: pd.DataFrame, date_column: str) -> tuple:
     if date_series.empty:
         return None, None
     return date_series.min().date(), date_series.max().date()
+
+
+def default_date_range(today: date | None = None) -> tuple[date, date]:
+    """From = today − 90 days, To = today (applied on first load)."""
+    today = today or date.today()
+    return today - timedelta(days=DEFAULT_LOOKBACK_DAYS), today
+
+
+def widget_date_bounds(
+    items: pd.DataFrame,
+    date_column: str,
+    today: date | None = None,
+) -> tuple[date, date]:
+    """Allow picking the 90-day default window even outside sheet min/max."""
+    today = today or date.today()
+    default_from, default_to = default_date_range(today)
+    sheet_min, sheet_max = date_bounds(items, date_column)
+    lows = [default_from]
+    highs = [default_to]
+    if sheet_min is not None:
+        lows.append(sheet_min)
+        highs.append(sheet_min)
+    if sheet_max is not None:
+        lows.append(sheet_max)
+        highs.append(sheet_max)
+    return min(lows), max(highs)
+
+
+def clamp_date(value, lo: date, hi: date, fallback: date) -> date:
+    if value is None:
+        return fallback
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
 
 
 def filter_items(
@@ -379,29 +422,26 @@ def main() -> None:
         st.stop()
 
     products = sorted(items["product_line"].dropna().unique().tolist())
-    available_basis = [
-        label
-        for label, col in DATE_BASIS_OPTIONS.items()
-        if col in items.columns and items[col].notna().any()
-    ] or [DEFAULT_DATE_BASIS]
+    available_basis = date_basis_options(items)
+    default_from, default_to = default_date_range()
 
     # Draft vs applied filters — widgets edit draft; KPIs/stock use applied until Apply.
     if "filters_initialized" not in st.session_state:
         default_basis = (
             DEFAULT_DATE_BASIS if DEFAULT_DATE_BASIS in available_basis else available_basis[0]
         )
-        min_date, max_date = date_bounds(items, date_column_for_basis(default_basis))
         st.session_state.draft_date_basis = default_basis
         st.session_state.applied_date_basis = default_basis
         st.session_state.draft_products = list(products)
-        st.session_state.draft_start = min_date
-        st.session_state.draft_end = max_date
+        st.session_state.draft_start = default_from
+        st.session_state.draft_end = default_to
         st.session_state.applied_products = list(products)
-        st.session_state.applied_start = min_date
-        st.session_state.applied_end = max_date
+        # First load already applied with today−90 → today.
+        st.session_state.applied_start = default_from
+        st.session_state.applied_end = default_to
         st.session_state.filters_initialized = True
     else:
-        # Drop stale product selections after sheet refresh; keep applied dates clamped.
+        # Drop stale product selections after sheet refresh.
         st.session_state.draft_products = [
             p for p in st.session_state.draft_products if p in products
         ] or list(products)
@@ -414,21 +454,23 @@ def main() -> None:
             st.session_state.applied_date_basis = available_basis[0]
 
     draft_basis = st.session_state.get("draft_date_basis", DEFAULT_DATE_BASIS)
-    draft_min, draft_max = date_bounds(items, date_column_for_basis(draft_basis))
+    draft_min, draft_max = widget_date_bounds(items, date_column_for_basis(draft_basis))
     applied_basis = st.session_state.get("applied_date_basis", DEFAULT_DATE_BASIS)
-    applied_min, applied_max = date_bounds(items, date_column_for_basis(applied_basis))
+    applied_min, applied_max = widget_date_bounds(items, date_column_for_basis(applied_basis))
 
-    # Clamp draft dates to the draft basis range; applied dates to the applied basis range.
-    if draft_min and draft_max:
-        for key in ("draft_start", "draft_end"):
-            value = st.session_state.get(key)
-            if value is None or value < draft_min or value > draft_max:
-                st.session_state[key] = draft_min if key.endswith("start") else draft_max
-    if applied_min and applied_max:
-        for key in ("applied_start", "applied_end"):
-            value = st.session_state.get(key)
-            if value is None or value < applied_min or value > applied_max:
-                st.session_state[key] = applied_min if key.endswith("start") else applied_max
+    # Keep dates inside the widget window (includes 90-day default + sheet span).
+    st.session_state.draft_start = clamp_date(
+        st.session_state.get("draft_start"), draft_min, draft_max, default_from
+    )
+    st.session_state.draft_end = clamp_date(
+        st.session_state.get("draft_end"), draft_min, draft_max, default_to
+    )
+    st.session_state.applied_start = clamp_date(
+        st.session_state.get("applied_start"), applied_min, applied_max, default_from
+    )
+    st.session_state.applied_end = clamp_date(
+        st.session_state.get("applied_end"), applied_min, applied_max, default_to
+    )
 
     filter_cols = st.columns([1.4, 1.6, 1, 1])
     with filter_cols[0]:
@@ -438,17 +480,18 @@ def main() -> None:
             key="draft_date_basis",
             help=(
                 "Disbursed Date = Money Received / Tanggal Dana Dilepaskan. "
-                "Payment Date = sheet Payment Date column."
+                "Payment Date = sheet Payment Date column. Both options always listed."
             ),
         )
-    # Recompute bounds if the selectbox just changed draft basis this run.
+    # Recompute widget bounds if the selectbox just changed draft basis this run.
     draft_basis = st.session_state.draft_date_basis
-    draft_min, draft_max = date_bounds(items, date_column_for_basis(draft_basis))
-    if draft_min and draft_max:
-        for key in ("draft_start", "draft_end"):
-            value = st.session_state.get(key)
-            if value is None or value < draft_min or value > draft_max:
-                st.session_state[key] = draft_min if key.endswith("start") else draft_max
+    draft_min, draft_max = widget_date_bounds(items, date_column_for_basis(draft_basis))
+    st.session_state.draft_start = clamp_date(
+        st.session_state.get("draft_start"), draft_min, draft_max, default_from
+    )
+    st.session_state.draft_end = clamp_date(
+        st.session_state.get("draft_end"), draft_min, draft_max, default_to
+    )
 
     with filter_cols[1]:
         st.multiselect("Product lines", options=products, key="draft_products")
@@ -457,16 +500,16 @@ def main() -> None:
             "From",
             min_value=draft_min,
             max_value=draft_max,
-            disabled=draft_min is None,
             key="draft_start",
+            help=f"Default on load: today − {DEFAULT_LOOKBACK_DAYS} days.",
         )
     with filter_cols[3]:
         st.date_input(
             "To",
             min_value=draft_min,
             max_value=draft_max,
-            disabled=draft_max is None,
             key="draft_end",
+            help="Default on load: today.",
         )
 
     apply_cols = st.columns([1, 5])

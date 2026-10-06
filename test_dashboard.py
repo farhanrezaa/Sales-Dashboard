@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
-from app import filter_items, format_pcs_with_boxes
+import pandas as pd
+
+from app import (
+    DEFAULT_LOOKBACK_DAYS,
+    date_basis_options,
+    default_date_range,
+    filter_items,
+    format_pcs_with_boxes,
+)
 from products import PCS_PER_BOX, build_line_items, demo_line_items, map_columns, _to_float
 from sheet_loader import DEFAULT_SHEET_URL, fetch_sheet_csv, parse_sheet_url
 
@@ -60,6 +68,25 @@ def test_demo_metrics() -> None:
     assert (demo["net_revenue"] == demo["gross_revenue"] - demo["cogs"]).all()
     assert "payment_at" in demo.columns
     assert demo["payment_at"].notna().any()
+
+
+def test_date_basis_options_always_both() -> None:
+    # Even with empty / all-null payment_at, both labels stay selectable.
+    empty = pd.DataFrame({"disbursed_at": [], "payment_at": []})
+    sparse = pd.DataFrame(
+        {"disbursed_at": [pd.Timestamp("2026-01-01")], "payment_at": [pd.NaT]}
+    )
+    assert date_basis_options(empty) == ["Disbursed Date", "Payment Date"]
+    assert date_basis_options(sparse) == ["Disbursed Date", "Payment Date"]
+    assert date_basis_options(None) == ["Disbursed Date", "Payment Date"]
+
+
+def test_default_date_range_90d() -> None:
+    today = date(2026, 10, 6)
+    start, end = default_date_range(today)
+    assert end == today
+    assert start == today - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+    assert DEFAULT_LOOKBACK_DAYS == 90
 
 
 def test_date_basis_filter() -> None:
