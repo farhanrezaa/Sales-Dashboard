@@ -1,28 +1,69 @@
 # RD Collectio Sales Dashboard
 
-Streamlit Phase 1 dashboard for **RD Collectio** Shopee sales: BurnX sales recap plus gross / net revenue from a pasteable Google Sheets link.
+Streamlit Phase 1 dashboard for **RD Collectio** Shopee sales: BurnX sales recap plus gross / net revenue from a private Google Sheet (service account) or optional public CSV fallback.
 
-App title: **RD Collectio Sales, Performance, and Stock Management Report** (stock UI comes later).
+App title: **RD Collectio Sales, Performance, and Stock Management Report**.
 
 ## Quick start
 
 ```bash
 python -m pip install -r requirements.txt
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# Edit secrets.toml with your SHEET_ID / SHEET_GID and service-account JSON fields
 streamlit run app.py --server.port 45123
 ```
 
 Open [http://127.0.0.1:45123](http://127.0.0.1:45123).
 
-## Google Sheets
+Without secrets (or if fetch fails), the app falls back to built-in demo data so the UI still runs. Click **Refresh** anytime to clear cache and re-fetch.
 
-1. Share the spreadsheet as **Anyone with the link → Viewer**.
-2. Paste the full edit URL into the sidebar (sheet id + `gid` are parsed automatically, including `pli=1` links).
-3. Click **Refresh** anytime to clear Streamlit cache and re-fetch CSV from the current link.
-4. Default Sales Report tab is prefilled:
-   `https://docs.google.com/spreadsheets/d/1uInQ3r5p0ye8t5PqXEb5J7Jltwtxn1sZ8KB1vf8sr9o/edit?pli=1&gid=792137116#gid=792137116`
-   (sheet id `1uInQ3r5p0ye8t5PqXEb5J7Jltwtxn1sZ8KB1vf8sr9o`, `gid=792137116`)
+## Private Google Sheet (recommended)
 
-If the sheet cannot be fetched (private sheet, network, etc.), the app falls back to built-in demo data so the UI still runs.
+1. In Google Cloud: create a service account, download its JSON key.
+2. Enable **Google Sheets API** and **Google Drive API** on that GCP project (Drive is required for `open_by_key` / file access).
+3. Share the spreadsheet with the service account `client_email` as **Viewer**.
+4. Put credentials + sheet identity in Streamlit secrets (local `.streamlit/secrets.toml` or Community Cloud **Secrets**). Never commit the real key.
+
+### Streamlit secrets shape
+
+Use this TOML (same shape on Community Cloud). Replace placeholders — do not paste real private keys into git or chat:
+
+```toml
+SHEET_ID = "your-spreadsheet-id"
+SHEET_GID = "792137116"
+
+[gcp_service_account]
+type = "service_account"
+project_id = "your-gcp-project"
+private_key_id = "xxxxxxxx"
+private_key = """-----BEGIN PRIVATE KEY-----
+xxxxxxxx
+-----END PRIVATE KEY-----
+"""
+client_email = "your-sa@your-gcp-project.iam.gserviceaccount.com"
+client_id = "1234567890"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-sa%40your-gcp-project.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
+```
+
+Notes:
+
+- `st.secrets["gcp_service_account"]` must match the JSON key fields.
+- `SHEET_ID` is required for the default private path. `SHEET_GID` selects the tab (optional; defaults to the first sheet).
+- Optional: `SHEET_URL` instead of / in addition to id+gid (id/gid are parsed from the URL).
+- Local example file: `.streamlit/secrets.toml.example`. Real `.streamlit/secrets.toml` is gitignored.
+- Sidebar URL field is an **optional override** for local testing; when blank, secrets win.
+
+### Community Cloud Secrets checklist
+
+1. Deploy from GitHub with main file `app.py`.
+2. App settings → **Secrets** → paste the TOML above (with real values).
+3. Confirm the sheet is shared with `client_email` as Viewer.
+4. Confirm Sheets API + Drive API are enabled.
+5. Redeploy / reboot the app, then click **Refresh** in the sidebar.
 
 ## Metrics
 
@@ -50,13 +91,13 @@ Place the brand mark at `assets/logo.png`. Until then the app shows an **RD** mo
 1. Push this repo to GitHub.
 2. At [share.streamlit.io](https://share.streamlit.io), **New app** → select the repo.
 3. Set **Main file path** to `app.py`.
-4. Deploy. Keep the Google Sheet public-to-view so Cloud can export CSV without secrets.
+4. Add Secrets (see above). Do **not** rely on a public “Anyone with the link” sheet.
 
 ## Sheet-column assumptions
 
 Supports two layouts:
 
-### RD Collectio ledger (default tab `gid=792137116`)
+### RD Collectio ledger (default tab via `SHEET_GID`)
 - Header row with **Payment Date**, **Money Received Date**, **Variant**, **Qty Sold**, **Income**.
 - Gross = **Income** (IDR-formatted).
 - Date basis filter (draft → **Apply**): **Disbursed Date** and **Payment Date** are always listed. Defaults: **From** = **2026-09-23** (initial stock as-of), **To** = today (applied on first load). All KPIs, sales recap, and remaining stock use the applied basis + range; rows missing the selected date are excluded.

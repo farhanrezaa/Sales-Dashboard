@@ -15,7 +15,7 @@ from products import (
     build_line_items,
     demo_line_items,
 )
-from sheet_loader import DEFAULT_SHEET_URL, fetch_sheet_csv
+from sheet_loader import SECRETS_HINT, fetch_sheet, resolve_sheet_identity, secrets_get
 
 st.set_page_config(
     page_title="RD Collectio Sales Report",
@@ -145,28 +145,66 @@ def find_logo() -> Path | None:
     return None
 
 
+def _read_service_account_from_secrets() -> dict | None:
+    """Return SA dict from st.secrets without putting the key into cache args."""
+    raw = secrets_get(st.secrets, "gcp_service_account")
+    if not raw:
+        return None
+    info = dict(raw)
+    if not info.get("client_email") or not info.get("private_key"):
+        return None
+    return info
+
+
 @st.cache_data(show_spinner=False, ttl=300)
-def load_live_items(sheet_url: str, refresh_token: int = 0) -> tuple[pd.DataFrame, str]:
+def load_live_items(
+    sheet_id: str,
+    gid: str | None,
+    use_service_account: bool,
+    refresh_token: int = 0,
+) -> tuple[pd.DataFrame, str]:
     """Load BurnX line items from the sheet.
 
     ``refresh_token`` is part of the cache key so each Refresh click fetches anew.
+    Service-account credentials are read inside this function (not cached as args).
     """
-    raw = fetch_sheet_csv(sheet_url, cache_bust=str(refresh_token))
+    sa = _read_service_account_from_secrets() if use_service_account else None
+    if use_service_account and not sa:
+        raise ValueError(SECRETS_HINT)
+    raw = fetch_sheet(
+        sheet_id=sheet_id,
+        gid=gid,
+        service_account_info=sa,
+        cache_bust=str(refresh_token),
+    )
     items = build_line_items(raw)
     return items, "live"
 
 
 def load_items(
-    sheet_url: str,
+    sheet_id: str | None,
+    gid: str | None,
+    use_service_account: bool,
     force_demo: bool,
     refresh_token: int = 0,
 ) -> tuple[pd.DataFrame, str, str | None]:
     if force_demo:
         return demo_line_items(), "demo", None
+    if not sheet_id:
+        return demo_line_items(), "demo", SECRETS_HINT
     try:
-        items, source = load_live_items(sheet_url, refresh_token)
+        items, source = load_live_items(
+            sheet_id,
+            gid,
+            use_service_account,
+            refresh_token,
+        )
         if items.empty:
-            return demo_line_items(), "demo", "Sheet loaded but no BurnX rows were found; showing demo data."
+            return (
+                demo_line_items(),
+                "demo",
+                "Sheet loaded but no BurnX rows were found; showing demo data.",
+            )
         return items, source, None
     except Exception as exc:  # noqa: BLE001 — surface fetch/parse issues in UI
         return demo_line_items(), "demo", str(exc)
@@ -394,18 +432,46 @@ def main() -> None:
     if "refresh_token" not in st.session_state:
         st.session_state.refresh_token = 0
 
+    secret_sheet_id, secret_gid, sa_info, secret_source = resolve_sheet_identity(
+        st.secrets
+    )
+    has_sa = sa_info is not None
+    default_caption = ""
+    if secret_source in {"secrets", "secrets_url"} and secret_sheet_id:
+        gid_label = secret_gid or "(first tab)"
+        default_caption = (
+            f"Default from secrets: SHEET_ID `{secret_sheet_id}` · gid `{gid_label}`"
+            + (" · service account" if has_sa else " · public CSV fallback")
+        )
+    elif has_sa:
+        default_caption = (
+            "Service account is configured, but SHEET_ID is missing in secrets "
+            "(or paste a sheet URL below)."
+        )
+    else:
+        default_caption = (
+            "No sheet secrets yet — set gcp_service_account + SHEET_ID in Streamlit secrets, "
+            "or paste a URL for local testing."
+        )
+
     with st.sidebar:
         st.header("Data source")
         sheet_url = st.text_input(
-            "Sales Report Google Sheets link",
-            value=DEFAULT_SHEET_URL,
-            help="Paste the full edit URL. The app reads sheet id + gid and loads the CSV export.",
+            "Sales Report Google Sheets link (optional override)",
+            value="",
+            placeholder="Leave blank to use SHEET_ID from secrets",
+            help=(
+                "Default identity comes from Streamlit secrets (SHEET_ID / SHEET_GID). "
+                "Paste a full edit URL here only to override for local testing."
+            ),
         )
+        if default_caption:
+            st.caption(default_caption)
         refresh_clicked = st.button(
             "Refresh",
             type="primary",
             use_container_width=True,
-            help="Re-fetch the latest rows from the current sheet link (bypasses cached data).",
+            help="Re-fetch the latest rows from the sheet (bypasses cached data).",
         )
         if refresh_clicked:
             st.session_state.refresh_token = int(st.session_state.refresh_token) + 1
@@ -514,17 +580,32 @@ def main() -> None:
         )
         st.caption("Mixed Matcha → 10 Lemon + 10 Mango. Mixed Fiber → 6/6/6.")
 
+    sheet_id, gid, resolved_sa, identity_source = resolve_sheet_identity(
+        st.secrets, sidebar_url=sheet_url
+    )
+    use_service_account = resolved_sa is not None
+
     with st.spinner("Loading sales sheet…"):
         items, source, error = load_items(
-            sheet_url,
+            sheet_id,
+            gid,
+            use_service_account,
             force_demo,
             refresh_token=int(st.session_state.refresh_token),
         )
 
     if error and source == "demo":
-        st.warning(f"Could not use the live sheet ({error}). Showing demo data instead.")
+        st.warning(
+            f"Could not use the live sheet ({error}). Showing demo data instead. "
+            "Check secrets / share the sheet with the service account as Viewer."
+        )
     elif source == "live":
-        st.success(f"Loaded {len(items)} BurnX line item(s) from the sheet.", icon="✅")
+        via = "service account" if use_service_account else "public CSV"
+        origin = "sidebar override" if identity_source == "sidebar_url" else "secrets"
+        st.success(
+            f"Loaded {len(items)} BurnX line item(s) via {via} ({origin}).",
+            icon="✅",
+        )
     else:
         st.info("Demo dataset loaded — useful for layout checks and Mixed SKU expansion.")
 

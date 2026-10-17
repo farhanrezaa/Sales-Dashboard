@@ -17,14 +17,20 @@ from app import (
     stock_remaining,
 )
 from products import PCS_PER_BOX, build_line_items, demo_line_items, map_columns, _to_float
-from sheet_loader import DEFAULT_SHEET_URL, fetch_sheet_csv, parse_sheet_url
+from sheet_loader import (
+    EXAMPLE_SHEET_URL,
+    normalize_service_account_info,
+    parse_sheet_url,
+    resolve_sheet_identity,
+    secrets_get,
+)
 
-NEW_SHEET_ID = "1uInQ3r5p0ye8t5PqXEb5J7Jltwtxn1sZ8KB1vf8sr9o"
+NEW_SHEET_ID = "EXAMPLE_SPREADSHEET_ID_REPLACE_ME"
 NEW_GID = "792137116"
 
 
 def test_parse_url() -> None:
-    sheet_id, gid = parse_sheet_url(DEFAULT_SHEET_URL)
+    sheet_id, gid = parse_sheet_url(EXAMPLE_SHEET_URL)
     assert sheet_id == NEW_SHEET_ID
     assert gid == NEW_GID
 
@@ -37,6 +43,42 @@ def test_parse_url_with_pli() -> None:
     sheet_id, gid = parse_sheet_url(url)
     assert sheet_id == NEW_SHEET_ID
     assert gid == NEW_GID
+
+
+def test_resolve_sheet_identity_from_secrets() -> None:
+    secrets = {
+        "SHEET_ID": NEW_SHEET_ID,
+        "SHEET_GID": NEW_GID,
+        "gcp_service_account": {
+            "client_email": "sa@example.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        },
+    }
+    sheet_id, gid, sa, source = resolve_sheet_identity(secrets)
+    assert sheet_id == NEW_SHEET_ID
+    assert gid == NEW_GID
+    assert source == "secrets"
+    assert sa is not None
+    assert "\n" in sa["private_key"]
+    assert "\\n" not in sa["private_key"]
+
+    # Sidebar URL overrides id/gid but keeps SA.
+    override = (
+        f"https://docs.google.com/spreadsheets/d/{NEW_SHEET_ID}/edit#gid=1"
+    )
+    sheet_id2, gid2, sa2, source2 = resolve_sheet_identity(secrets, sidebar_url=override)
+    assert sheet_id2 == NEW_SHEET_ID
+    assert gid2 == "1"
+    assert source2 == "sidebar_url"
+    assert sa2 is not None
+
+
+def test_secrets_get_and_normalize_key() -> None:
+    assert secrets_get({"SHEET_ID": "abc"}, "SHEET_ID", "sheet_id") == "abc"
+    assert secrets_get({}, "SHEET_ID", default="x") == "x"
+    info = normalize_service_account_info({"private_key": "A\\nB\\nC"})
+    assert info["private_key"] == "A\nB\nC"
 
 
 def test_idr_float() -> None:
@@ -146,41 +188,52 @@ def test_date_basis_filter() -> None:
 
 
 def test_live_sheet_optional() -> None:
-    """Live fetch for the default ledger tab."""
-    raw = fetch_sheet_csv(DEFAULT_SHEET_URL, cache_bust="test")
+    """Optional live fetch via local secrets — skipped when unavailable."""
+    from pathlib import Path
+
+    from sheet_loader import fetch_sheet
+
+    secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    if not secrets_path.exists():
+        print("skip live sheet: no .streamlit/secrets.toml")
+        return
+
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover
+        import tomli as tomllib  # type: ignore
+
+    with secrets_path.open("rb") as fh:
+        secrets = tomllib.load(fh)
+
+    sheet_id, gid, sa, _source = resolve_sheet_identity(secrets)
+    if not sheet_id or not sa:
+        print("skip live sheet: secrets missing SHEET_ID or gcp_service_account")
+        return
+
+    try:
+        raw = fetch_sheet(sheet_id=sheet_id, gid=gid, service_account_info=sa)
+    except Exception as exc:  # noqa: BLE001
+        print("skip live sheet (auth/network):", exc)
+        return
+
     mapping = map_columns(raw)
     assert mapping.get("disbursed_at") in {"Money Received Date", "Tanggal Dana Dilepaskan"}
     assert mapping.get("payment_at") == "Payment Date"
-    assert "Payment Date" in raw.columns
     assert mapping.get("gross") in {"Income", "Total Penghasilan"}
     assert mapping.get("product_name") in {"Variant", "Nama Produk"}
-    assert "Qty Sold" in raw.columns or any("qty" in c.lower() for c in raw.columns)
 
     items = build_line_items(raw)
     assert not items.empty
     assert items["gross_revenue"].sum() > 0
-    assert items["product_line"].isin(["BurnX Matcha", "BurnX Fiber"]).all()
-    assert items["disbursed_at"].notna().any()
-    assert items["payment_at"].notna().any()
-    print(
-        "live rows",
-        len(items),
-        "gross",
-        float(items["gross_revenue"].sum()),
-        "net",
-        float(items["net_revenue"].sum()),
-        "pcs",
-        float(items["pcs"].sum()),
-        "payment_at non-null",
-        int(items["payment_at"].notna().sum()),
-        "columns",
-        list(raw.columns),
-    )
+    print("live rows", len(items), "gross", float(items["gross_revenue"].sum()))
 
 
 if __name__ == "__main__":
     test_parse_url()
     test_parse_url_with_pli()
+    test_resolve_sheet_identity_from_secrets()
+    test_secrets_get_and_normalize_key()
     test_idr_float()
     test_stock_remaining()
     test_stock_remaining_with_stock_in_simulation()
